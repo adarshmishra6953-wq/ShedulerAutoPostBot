@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import threading  # Threading import kiya
+from flask import Flask # Flask import kiya
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,6 +13,24 @@ from telegram.ext import (
     filters,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# ==========================================
+# 🌐 FAKE WEB SERVER (RENDER KO KHUSH RAKHNE KE LIYE)
+# ==========================================
+app_server = Flask(__name__)
+
+@app_server.route('/')
+def health_check():
+    return "Bot is Alive! ✅"
+
+def run_web_server():
+    # Render PORT environment variable deta hai, use wo use karein
+    port = int(os.environ.get("PORT", 8080))
+    app_server.run(host='0.0.0.0', port=port)
+
+# ==========================================
+# 🤖 BOT CONFIGURATION
+# ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
@@ -51,7 +71,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- ADD CHANNEL ----------
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    context.user_data["state"] = "waiting_for_channel"  # STATE SET KIYA
+    context.user_data["state"] = "waiting_for_channel"
     await update.callback_query.message.reply_text(
         "Channel ka @username bhejein\nExample:\n@mychannel"
     )
@@ -106,11 +126,10 @@ async def channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    context.user_data["state"] = "waiting_for_photo" # STATE SET KIYA
+    context.user_data["state"] = "waiting_for_photo"
     await update.callback_query.message.reply_text("Photo bhejein (caption optional)")
 
 async def save_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check karein agar hum photo ka wait kar rahe hain
     if context.user_data.get("state") != "waiting_for_photo":
         return
 
@@ -119,14 +138,13 @@ async def save_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["photo_id"] = photo_id
     context.user_data["caption"] = caption
-    context.user_data["state"] = "waiting_for_time" # STATE UPDATE KIYA
+    context.user_data["state"] = "waiting_for_time"
     
     await update.message.reply_text("Time bhejein (HH:MM) Example: 14:30")
 
 async def save_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         time_text = update.message.text.strip()
-        # Time format validation (optional but good)
         datetime.strptime(time_text, "%H:%M")
         
         cur.execute("""
@@ -145,27 +163,21 @@ async def save_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Galat format. Kripya HH:MM format mein bhejein (e.g., 14:30)")
 
-# ---------- CENTRAL TEXT HANDLER ----------
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get("state")
-    
     if state == "waiting_for_channel":
         await save_channel(update, context)
     elif state == "waiting_for_time":
         await save_time(update, context)
     else:
-        # Agar user bina button dabaye kuch likhta hai
         await update.message.reply_text("Kripya pehle menu se option select karein (/start).")
 
 # ---------- SCHEDULER ----------
 async def send_posts(app):
     now = datetime.now().strftime("%H:%M")
-    # Debug print to check in logs
     print(f"Checking schedule for: {now}") 
-    
     cur.execute("SELECT channel_id, photo_id, caption FROM posts WHERE time=?", (now,))
     posts = cur.fetchall()
-    
     for cid, pid, cap in posts:
         try:
             await app.bot.send_photo(cid, pid, caption=cap)
@@ -175,6 +187,13 @@ async def send_posts(app):
 
 # ---------- MAIN ----------
 def main():
+    # 1. Pehle Fake Web Server ko alag thread mein start karo
+    print("Starting Web Server for Render...")
+    server_thread = threading.Thread(target=run_web_server)
+    server_thread.daemon = True
+    server_thread.start()
+
+    # 2. Phir Bot start karo
     print("Bot is starting...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -182,19 +201,12 @@ def main():
     scheduler.add_job(send_posts, "interval", minutes=1, args=[app])
     scheduler.start()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
-    
-    # Callbacks
     app.add_handler(CallbackQueryHandler(add_channel, pattern="add_channel"))
     app.add_handler(CallbackQueryHandler(list_channels, pattern="list_channels"))
     app.add_handler(CallbackQueryHandler(channel_menu, pattern="ch_"))
     app.add_handler(CallbackQueryHandler(add_post, pattern="add_post"))
-
-    # Message Handlers
     app.add_handler(MessageHandler(filters.PHOTO, save_post))
-    
-    # Sirf ek Text Handler jo decision lega ki kya karna hai
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
     app.run_polling()
