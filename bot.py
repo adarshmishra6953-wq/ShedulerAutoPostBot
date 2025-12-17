@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS posts (
 """)
 conn.commit()
 
-# ---------- WEB SERVER (For Render) ----------
+# ---------- WEB SERVER (For Render Health Check) ----------
 app_server = Flask(__name__)
 @app_server.route('/')
 def health(): return "Bot is Running! ✅"
@@ -50,19 +50,34 @@ def main_menu():
         [InlineKeyboardButton("📋 My Channels", callback_data="list_ch")]
     ])
 
-# ---------- AUTO POSTING LOGIC ----------
+# ---------- AUTO POSTING LOGIC (With Safe Mode) ----------
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(IST).strftime("%H:%M")
     cur.execute("SELECT id, channel_id, photo_id, caption FROM posts WHERE time=?", (now,))
-    for pid, cid, photo, cap in cur.fetchall():
+    posts_to_send = cur.fetchall()
+    
+    for pid, cid, photo, cap in posts_to_send:
         try:
-            await context.bot.send_photo(chat_id=cid, photo=photo, caption=f"*{cap}*", parse_mode=ParseMode.MARKDOWN)
-            print(f"✅ Posted at {now}")
-        except Exception as e: print(f"❌ Error: {e}")
+            # Pehle Bold formatting ke saath try karega
+            await context.bot.send_photo(
+                chat_id=cid, 
+                photo=photo, 
+                caption=f"*{cap}*", 
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception:
+            # Agar Markdown fail hota hai toh normal text bhej dega
+            await context.bot.send_photo(chat_id=cid, photo=photo, caption=cap)
+        print(f"✅ Auto-posted at {now} IST")
 
 # ---------- HANDLERS ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💎 *Advanced Auto-Post Bot Active*", reply_markup=main_menu(), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "💎 *Advanced Auto-Post Bot Active*\n\n"
+        "Features: IST Time, Edit/Delete, Safe Markdown.",
+        reply_markup=main_menu(),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -74,17 +89,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "add_ch":
         context.user_data['step'] = 'wait_ch'
-        await query.message.edit_text("📩 Channel ka @username bhejein:")
+        await query.message.edit_text("📩 Channel ka @username bhejein (Bot ko Admin banayein):")
 
     elif data == "list_ch":
         cur.execute("SELECT channel_id, channel_name FROM channels")
         rows = cur.fetchall()
         if not rows:
-            await query.message.edit_text("❌ Koi channel nahi hai.", reply_markup=main_menu())
+            await query.message.edit_text("❌ Koi channel nahi mila.", reply_markup=main_menu())
             return
         btns = [[InlineKeyboardButton(r[1], callback_data=f"manage_{r[0]}")] for r in rows]
         btns.append([InlineKeyboardButton("🔙 Back", callback_data="main")])
-        await query.message.edit_text("Select Channel to Manage:", reply_markup=InlineKeyboardMarkup(btns))
+        await query.message.edit_text("Select Channel:", reply_markup=InlineKeyboardMarkup(btns))
 
     elif data.startswith("manage_"):
         cid = int(data.split("_")[1])
@@ -94,7 +109,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📅 View/Delete Posts", callback_data=f"view_{cid}")],
             [InlineKeyboardButton("🔙 Back", callback_data="list_ch")]
         ]
-        await query.message.edit_text(f"Channel ID: {cid}\nAction select karein:", reply_markup=InlineKeyboardMarkup(btns))
+        await query.message.edit_text(f"Channel Management:\nID: {cid}", reply_markup=InlineKeyboardMarkup(btns))
 
     elif data == "new_post":
         context.user_data['step'] = 'wait_photo'
@@ -105,11 +120,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT id, time FROM posts WHERE channel_id=?", (cid,))
         posts = cur.fetchall()
         if not posts:
-            await query.message.edit_text("Is channel mein koi scheduled post nahi hai.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"manage_{cid}")]]))
+            await query.message.edit_text("Is channel mein koi post nahi hai.", 
+                                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"manage_{cid}")]]))
             return
         btns = [[InlineKeyboardButton(f"⏰ {p[1]}", callback_data=f"details_{p[0]}")] for p in posts]
         btns.append([InlineKeyboardButton("🔙 Back", callback_data=f"manage_{cid}")])
-        await query.message.edit_text("Select a post to manage:", reply_markup=InlineKeyboardMarkup(btns))
+        await query.message.edit_text("Scheduled Posts (Time IST):", reply_markup=InlineKeyboardMarkup(btns))
 
     elif data.startswith("details_"):
         pid = int(data.split("_")[1])
@@ -122,7 +138,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data=f"view_{p[4]}")]
             ]
             await query.message.delete()
-            await context.bot.send_photo(query.message.chat_id, p[1], caption=f"⏰ *Time:* {p[3]}\n\n📝 *Caption:* {p[2]}", reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.MARKDOWN)
+            try:
+                # Preview with formatting
+                await context.bot.send_photo(
+                    query.message.chat_id, p[1], 
+                    caption=f"⏰ *Time:* {p[3]}\n\n📝 *Caption:* {p[2]}", 
+                    reply_markup=InlineKeyboardMarkup(btns), 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception:
+                # Fallback if markdown fails
+                await context.bot.send_photo(
+                    query.message.chat_id, p[1], 
+                    caption=f"⏰ Time: {p[3]}\n\n📝 Caption: {p[2]}", 
+                    reply_markup=InlineKeyboardMarkup(btns)
+                )
 
     elif data.startswith("edit_"):
         context.user_data['edit_id'] = data.split("_")[1]
@@ -133,10 +163,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pid = int(data.split("_")[1])
         cur.execute("DELETE FROM posts WHERE id=?", (pid,))
         conn.commit()
-        await context.bot.send_message(query.message.chat_id, "✅ Post Deleted successfully!")
-        await start(update, context)
+        await context.bot.send_message(query.message.chat_id, "✅ Post successfully delete kar di gayi hai.")
+        # Return to main menu safely
+        await context.bot.send_message(query.message.chat_id, "Main Menu:", reply_markup=main_menu())
 
-# ---------- MESSAGE HANDLER ----------
+# ---------- MESSAGE HANDLERS ----------
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('step')
     text = update.message.text
@@ -146,8 +177,9 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat = await context.bot.get_chat(text)
             cur.execute("INSERT OR IGNORE INTO channels VALUES (?,?)", (chat.id, chat.title))
             conn.commit()
-            await update.message.reply_text(f"✅ Channel Added: {chat.title}", reply_markup=main_menu())
-        except: await update.message.reply_text("❌ Invalid @username. Bot ko Admin banayein.")
+            await update.message.reply_text(f"✅ Added: {chat.title}", reply_markup=main_menu())
+        except: 
+            await update.message.reply_text("❌ Error: Channel @username sahi nahi hai ya bot admin nahi hai.")
         
     elif step == 'wait_time':
         try:
@@ -155,14 +187,15 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("INSERT INTO posts (channel_id, photo_id, caption, time) VALUES (?,?,?,?)",
                        (context.user_data['cid'], context.user_data['photo'], context.user_data['caption'], text))
             conn.commit()
-            await update.message.reply_text(f"✅ Post scheduled for {text} IST!", reply_markup=main_menu())
-        except: await update.message.reply_text("❌ Format: HH:MM use karein (e.g., 14:30)")
+            await update.message.reply_text(f"✅ Scheduled for {text} IST!", reply_markup=main_menu())
+        except: 
+            await update.message.reply_text("❌ Galat format! HH:MM use karein (e.g. 17:30)")
 
     elif step == 'wait_edit':
         pid = context.user_data['edit_id']
         cur.execute("UPDATE posts SET caption=? WHERE id=?", (text, pid))
         conn.commit()
-        await update.message.reply_text("✅ Caption updated successfully!", reply_markup=main_menu())
+        await update.message.reply_text("✅ Caption update ho gaya!", reply_markup=main_menu())
 
     context.user_data['step'] = None
 
@@ -171,21 +204,30 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['photo'] = update.message.photo[-1].file_id
         context.user_data['caption'] = update.message.caption or ""
         context.user_data['step'] = 'wait_time'
-        await update.message.reply_text("⏰ Time bhejein (HH:MM IST):")
+        await update.message.reply_text("⏰ Kis samay post karna hai? (HH:MM IST, e.g. 14:30):")
 
-# ---------- MAIN ----------
+# ---------- MAIN FUNCTION ----------
 def main():
+    # Start web server thread
     threading.Thread(target=run_web, daemon=True).start()
+    
+    if not BOT_TOKEN:
+        print("BOT_TOKEN is missing!")
+        return
+
+    # Build Application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Auto-post check every minute
+    # Schedule checker every 60 seconds
     app.job_queue.run_repeating(auto_post_job, interval=60, first=10)
 
+    # Add Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     
+    print("🚀 Bot is launching...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
